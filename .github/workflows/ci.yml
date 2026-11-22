@@ -24,8 +24,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyyaml
+      # These tests read sibling directories (../10-ARCHITECTURE, ../30-APP, ../README.md)
+      # from the original monorepo layout. They are not applicable to this standalone repo.
       - name: Fast tests (memory/SQLite)
         env:
           PYTHONPATH: src
           APP_ENV: dev
-        run: pytest tests -q --ignore=tests/test_pg_integration.py --ignore=tests/test_ops_hardening.py
+        run: |
+          pytest tests -q \
+            --ignore=tests/test_pg_integration.py \
+            --ignore=tests/test_ops_hardening.py \
+            --deselect=tests/test_rebrand.py \
+            --deselect=tests/test_release_gate.py::test_gate_12_docs_match_code \
+            --deselect='tests/test_schema_sync.py::test_enum_matches_catalog[../10-ARCHITECTURE/data-model.sql]' \
+            --deselect=tests/test_schema_sync.py::test_openapi_matches_app
