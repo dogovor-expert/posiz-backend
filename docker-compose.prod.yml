@@ -1,0 +1,60 @@
+# Прод-профиль поверх docker-compose.yml.
+#
+# Отличия от базового:
+#  * исходники НЕ монтируются: код берётся из образа (immutable deploy);
+#  * API слушает только внутреннюю сеть, наружу — через reverse-proxy (Caddy/Nginx/Ingress);
+#  * `read_only` + `tmpfs` для API и воркера: скомпрометированный процесс не пишет в ФС;
+#  * секреты — из окружения/secret-хранилища (никаких .env в образе);
+#  * `restart: always` и лимиты памяти, чтобы один воркер не выедал хост.
+#
+# Запуск:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+services:
+  api:
+    read_only: true
+    tmpfs: ["/tmp"]
+    ports: []                                   # наружу не публикуем
+    expose: ["8000"]
+    environment:
+      APP_ENV: production
+      RBAC_DEMO_ROLES: "0"
+      # Роль Redis: у API свои ключи (сессии, state, лимиты), у воркера — очередь.
+      # Пароли ролей приходят из секрет-хранилища, не из .env в образе.
+      ORBITA_REDIS_ROLE: api
+      # Метрики в проде не отдаются анонимно: без токена /metrics отвечает 403.
+      METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN обязателен в проде}
+    volumes: []
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 1g}
+    restart: always
+
+  worker:
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      APP_ENV: production
+      ORBITA_REDIS_ROLE: worker
+    volumes: []
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 1g}
+    restart: always
+
+  migrate:
+    volumes: []
+    restart: "no"
+
+  # Резервное копирование и проверка восстановления.
+  # Отдельная роль с BYPASSRLS обязательна: у таблиц FORCE ROW LEVEL SECURITY, и pg_dump
+  # под рабочей ролью падает на политиках (проверено на живой базе).
+  backup:
+    image: postgres:17-alpine
+    profiles: ["ops"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "pg_dump \"$$BACKUP_DATABASE_URL\" -Fc --no-owner -f /backup/orbita-$$(date +%Y%m%d-%H%M).pgc"
+    environment:
+      BACKUP_DATABASE_URL: ${BACKUP_DATABASE_URL:?нужна роль с BYPASSRLS}
+    volumes: ["/var/backups/orbita:/backup"]
+    restart: "no"

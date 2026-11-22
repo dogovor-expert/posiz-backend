@@ -1,0 +1,26 @@
+# Контекст сборки: только то, что нужно образу.
+# Раньше `docker build .` отправлял в демон тесты, .git и локальные базы — это
+# и лишние мегабайты, и риск утащить в образ то, чего в нём быть не должно.
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.db
+*.sqlite3
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests
+docs
+*.md
+.env
+.env.*
+!.env.example
+node_modules
+dist
+coverage
+htmlcov
+.DS_Store

@@ -1,0 +1,16 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+httpx==0.28.1
+python-dotenv==1.0.1
+redis==5.2.1
+psycopg[binary]==3.2.3
+sqlalchemy==2.0.36
+alembic==1.14.0
+arq==0.26.3
+cryptography==44.0.0
+# Необязательно: playwright включает пакетный растр кадров (50 мс/кадр вместо 3,3 с).
+# Без него ролики собираются пофреймовым запуском Chromium — медленнее, но так же корректно.
+# pip install playwright && playwright install chromium
+pytest==8.3.4
+pytest-asyncio==0.25.0

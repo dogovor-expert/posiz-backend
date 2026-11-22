@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: System tools for media gates
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg librsvg2-bin
+      - name: Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyyaml
+      - name: Fast tests (memory/SQLite)
+        env:
+          PYTHONPATH: src
+          APP_ENV: dev
+        run: pytest tests -q --ignore=tests/test_pg_integration.py --ignore=tests/test_ops_hardening.py

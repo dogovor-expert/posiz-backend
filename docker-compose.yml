@@ -1,0 +1,124 @@
+# Базовый контур Posiz (используется и локально, и в проде).
+#
+#   локально:  docker compose -f docker-compose.yml -f docker-compose.local.yml up
+#   прод:      docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Базовый файл намеренно НЕ публикует порты БД и Redis и не содержит паролей:
+# послабления для разработки собраны в docker-compose.local.yml (только 127.0.0.1),
+# прод-отличия — в docker-compose.prod.yml.
+#
+# Правило файла: **никаких паролей и ключей по умолчанию**. Всё берётся из окружения
+# (`.env` локально, secret-хранилище в проде), а обязательные значения перечислены
+# через `${VAR:?…}` — стек не поднимется «на дефолтном пароле», а сразу скажет, чего нет.
+#
+# Что исправлено после аудита:
+#  1. `POSTGRES_PASSWORD: postgres` и `CREATE ROLE orbita_app … PASSWORD 'orbita_app'`
+#     заменены на секреты из окружения.
+#  2. Порты PostgreSQL и Redis больше не публикуются наружу: доступ только по внутренней
+#     docker-сети (локально — через `docker compose exec`, если нужно).
+#  3. Redis с паролем (`requirepass`) и `protected-mode`.
+#  4. Образ БД — `pgvector/pgvector:pg16`; схема создаётся только Alembic.
+#  5. API и воркер ходят непривилегированной ролью `orbita_app` (NOSUPERUSER/NOBYPASSRLS).
+#  6. Воркер — настоящий ARQ (`arq …WorkerSettings`), а не процесс, который «ждёт события».
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://orbita_app:${ORBITA_DB_PASSWORD:?ORBITA_DB_PASSWORD не задан}@db:5432/orbita
+  REDIS_URL: redis://:${ORBITA_REDIS_PASSWORD:?ORBITA_REDIS_PASSWORD не задан}@redis:6379/0
+  DATA_LAYER: db
+  APP_ENV: ${APP_ENV:-production}
+  # Медиа-конвейер: общий том между API и воркером (рендерит воркер — отдаёт API).
+  # В проде вместо спула — S3/MinIO: MEDIA_STORAGE=s3 + MEDIA_S3_*.
+  MEDIA_STORAGE: ${MEDIA_STORAGE:-spool}
+  MEDIA_SPOOL_DIR: /var/lib/posiz/media
+  MEDIA_TTL_DAYS: ${MEDIA_TTL_DAYS:-14}
+  # Подпись публичных ссылок: без неё карточки не уходят в каналы
+  MEDIA_URL_SECRET: ${MEDIA_URL_SECRET:?MEDIA_URL_SECRET не задан}
+  MEDIA_PUBLIC_BASE: ${MEDIA_PUBLIC_BASE:-http://localhost:8000}
+  # Растеризатор: в образе есть rsvg-convert, путь фиксируем явно
+  MEDIA_RASTER_BIN: ${MEDIA_RASTER_BIN:-/usr/bin/rsvg-convert}
+  # Кодирование роликов: ffmpeg в образе, путь фиксируем явно
+  MEDIA_FFMPEG_BIN: ${MEDIA_FFMPEG_BIN:-/usr/bin/ffmpeg}
+  MEDIA_FFPROBE_BIN: ${MEDIA_FFPROBE_BIN:-/usr/bin/ffprobe}
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD не задан}
+      POSTGRES_DB: orbita
+      ORBITA_DB_PASSWORD: ${ORBITA_DB_PASSWORD:?ORBITA_DB_PASSWORD не задан}
+    # порт наружу НЕ публикуется: база доступна только внутри docker-сети
+    expose: ["5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/00_cluster_init.sql:/docker-entrypoint-initdb.d/00_cluster_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d orbita -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # пароль из окружения + отключён доступ без авторизации
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${ORBITA_REDIS_PASSWORD:?ORBITA_REDIS_PASSWORD не задан}", "--protected-mode", "yes"]
+    expose: ["6379"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${ORBITA_REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      ORBITA_REDIS_PASSWORD: ${ORBITA_REDIS_PASSWORD:?ORBITA_REDIS_PASSWORD не задан}
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    env_file: .env
+    environment: *app-env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
+    volumes: ["./migrations:/app/migrations", "./alembic.ini:/app/alembic.ini",
+              "./schema.sql:/app/schema.sql:ro", "./sql:/app/sql:ro"]
+
+  api:
+    build: .
+    env_file: .env
+    environment: *app-env
+    command: ["uvicorn", "orbita.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["${API_BIND:-127.0.0.1:8000}:8000"]     # по умолчанию только localhost
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes: ["./src:/app/src", "media:/var/lib/posiz/media"]
+    restart: unless-stopped
+
+  worker:
+    build: .
+    env_file: .env
+    environment: *app-env
+    command: ["arq", "orbita.workers.run.WorkerSettings"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    volumes: ["./src:/app/src", "media:/var/lib/posiz/media"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  media:

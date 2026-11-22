@@ -1,0 +1,27 @@
+# Локальный стенд поверх docker-compose.yml.
+#
+# Что добавляет:
+#  * порты БД и Redis — ТОЛЬКО на 127.0.0.1 (для psql/redis-cli и тестов на хосте);
+#  * hot-reload API (uvicorn --reload) и монтирование исходников;
+#  * отдельная тестовая база создаётся скриптом `scripts/dev_db.sh` (в проде её нет).
+#
+# Запуск:
+#   cp .env.example .env && подготовить секреты
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up
+services:
+  db:
+    ports: ["127.0.0.1:${DB_PORT:-5432}:5432"]
+  redis:
+    ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
+
+  api:
+    command: ["uvicorn", "orbita.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      APP_ENV: dev
+      LOG_LEVEL: debug
+    ports: ["${API_BIND:-127.0.0.1:8000}:8000"]
+
+  worker:
+    environment:
+      APP_ENV: dev
+      LOG_LEVEL: debug
